@@ -1,0 +1,18 @@
+# DLM Standard January 2020
+# Default Status=Action pairs
+# [SUCCESS=return NOTFOUND=continue UNAVAIL=continue TRYAGAIN=continue]
+hosts:        files dns
+passwd:       files sss
+shadow:       files sss
+group:        files sss
+services:     files sss
+protocols:    files
+bootparams:   files
+rpc:          files
+automount:    files sss
+aliases:      files
+ethers:       files
+netmasks:     files
+networks:     files dns
+netgroup:     files
+sudoers:      files sss
