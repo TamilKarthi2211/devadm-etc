@@ -1,0 +1,477 @@
+#!/bin/bash
+###
+### stdlib.sh - foundation library for Bash scripts
+###             Need Bash version 4.3 or above - see http://tiswww.case.edu/php/chet/bash/NEWS
+###
+### Source: https://raw.githubusercontent.com/codeforester/base/master/lib/stdlib.sh
+###
+### License:
+###   MIT License
+###   Copyright (c) 2019 Ramesh Padmanabhaiah
+###   Permission is hereby granted, free of charge, to any person obtaining a copy
+###   of this software and associated documentation files (the "Software"), to deal
+###   in the Software without restriction, including without limitation the rights
+###   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+###   copies of the Software, and to permit persons to whom the Software is
+###   furnished to do so, subject to the following conditions:
+###
+###   The above copyright notice and this permission notice shall be included in all
+###   copies or substantial portions of the Software.
+###
+###   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+###   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+###   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+###   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+###   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+###   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+###   SOFTWARE.
+###
+### Areas covered:
+###     - PATH manipulation
+###     - logging
+###     - error handling
+###
+### Modifications by:
+###   - Simon Deckwert (i511727) simon.deckwert@sap.com
+###
+### Version: 1.1.4
+###
+### Release: 16th April 2020
+###
+################################################# INITIALIZATION #######################################################
+
+#
+# make sure we do nothing in case the library is sourced more than once in the same shell
+#
+[[ $__stdlib_sourced__ ]] && return
+__stdlib_sourced__=1
+
+#
+# The only code that executes when the library is sourced
+#
+__stdlib_init__() {
+  __log_init__
+
+  # call future init functions here
+}
+
+################################################# LIBRARY IMPORTER #####################################################
+
+#
+# import: source a library from $BASE_HOME
+# Example:
+#     import lib/assertions.sh company/lib/xyz.sh ...
+#
+# IMPORTANT NOTE: If your library has global variables declared with 'declare' statement, you need to add -g flag to those.
+#                 Since the library gets sourced inside the `import` function, globals declared without the -g option would
+#                 be local to the function and hence be unavailable to other functions.
+import() {
+  local lib rc=0
+  [[ $BASE_HOME ]] || { printf '%s\n' "ERROR: BASE_HOME not set; import functionality needs it" >&2; return 1; }
+  for lib; do
+    lib=$BASE_HOME/$lib
+    if [[ -f "$lib" ]]; then
+      source "$lib"
+    else
+      printf 'ERROR: %s\n' "Library '$lib' does not exist" >&2
+      rc=1
+    fi
+  done
+  return $rc
+}
+
+################################################# PATH MANIPULATION ####################################################
+
+# add a new directory to $PATH
+add_to_path() {
+  local dir re prepend=0 opt strict=1
+  OPTIND=1
+  while getopts sp opt; do
+    case "$opt" in
+      n)  strict=0  ;;  # don't care if directory exists or not before adding it to PATH
+      p)  prepend=1 ;;  # prepend the directory to PATH instead of appending
+      *)  log_error "add_to_path - invalid option '$opt'"
+      return
+      ;;
+    esac
+  done
+
+  shift $((OPTIND-1))
+  for dir; do
+    ((strict)) && [[ ! -d $dir ]] && continue
+    re="(^$dir:|:$dir:|:$dir$)"
+    if ! [[ $PATH =~ $re ]]; then
+      ((prepend)) && PATH="$dir:$PATH" || PATH="$PATH:$dir"
+    fi
+  done
+}
+
+# remove duplicates in $PATH
+dedupe_path() { PATH="$(perl -e 'print join(":", grep { not $seen{$_}++ } split(/:/, $ENV{PATH}))')"; }
+
+# print directories in $PATH, one per line
+print_path() {
+  local -a dirs; local dir
+  IFS=: read -ra dirs <<< "$PATH"
+  for dir in "${dirs[@]}"; do printf '%s\n' "$dir"; done
+}
+
+#################################################### LOGGING ###########################################################
+
+__log_init__() {
+  # colors for logging
+  [[ $COLOR_RED ]]    || COLOR_RED="\e[1;31m"
+  [[ $COLOR_YELLOW ]] || COLOR_YELLOW="\e[1;33m"
+  [[ $COLOR_BLUE ]]   || COLOR_BLUE="\e[1;34m"
+  [[ $COLOR_OFF ]]    || COLOR_OFF="\e[0m"
+  readonly COLOR_RED COLOR_YELLOW COLOR_OFF
+
+  #
+  # map log level strings (FATAL, ERROR, etc.) to numeric values
+  #
+  # Note the '-g' option passed to declare - it is essential
+  #
+  unset _log_levels _loggers_level_map
+  declare -gA _log_levels _loggers_level_map
+  _log_levels=([FATAL]=0 [ERROR]=1 [WARN]=2 [INFO]=3 [DEBUG]=4 [VERBOSE]=5)
+
+  #
+  # hash to map loggers to their log levels
+  #
+  _loggers_level_map["servmgnt"]=3
+
+  #
+  # map log mode strings (system, stdout, file) to numeric values
+  #
+  # Note the '-g' option passed to declare - it is essential
+  #
+  unset _log_modes _loggers_mode_map
+  declare -gA _log_modes _loggers_mode_map
+  _log_modes=([stdout]=0 [system]=1 [file]=2)
+
+  #
+  # hash to map loggers to their log modes
+  #
+  _loggers_mode_map["servmgnt"]=0
+
+  #
+  # Save log path
+  #
+  # Note the '-g' option passed to declare - it is essential
+  #
+  unset _loggers_path_map
+  declare -gA _loggers_path_map
+
+  #
+  # hash to map loggers to their log modes
+  #
+  _loggers_path_map["servmgnt"]=/var/log/servmgnt.log
+
+}
+
+#
+# set_log_level
+#
+set_log_level() {
+  local logger=servmgnt in_level l
+  [[ $1 = "-l" ]] && { logger=$2; shift 2 2>/dev/null; }
+  in_level="${1:-INFO}"
+  if [[ $logger ]]; then
+    l="${_log_levels[$in_level]}"
+    if [[ $l ]]; then
+      _loggers_level_map[$logger]=$l
+    else
+      printf '%(%Y-%m-%d:%H:%M:%S)T %-7s %s\n' -1 WARN \
+      "${BASH_SOURCE[2]}:${BASH_LINENO[1]} Unknown log level '$in_level' for logger '$logger'; setting to INFO"
+      _loggers_level_map[$logger]=3
+    fi
+  else
+    printf '%(%Y-%m-%d:%H:%M:%S)T %-7s %s\n' -1 WARN \
+    "${BASH_SOURCE[2]}:${BASH_LINENO[1]} Option '-l' needs an argument" >&2
+  fi
+}
+
+#
+# set_log_mode
+#
+set_log_mode() {
+  local logger=servmgnt in_mode l
+  [[ $1 = "-l" ]] && { logger=$2; shift 2 2>/dev/null; }
+  in_mode="${1:-stdout}"
+  if [[ $logger ]]; then
+    l="${_log_modes[$in_mode]}"
+    if [[ $l ]]; then
+      _loggers_mode_map[$logger]=$l
+    else
+      printf '%(%Y-%m-%d:%H:%M:%S)T %-7s %s\n' -1 WARN \
+      "${BASH_SOURCE[2]}:${BASH_LINENO[1]} Unknown log mode '$in_mode' for logger '$logger'; setting to stdout"
+      _loggers_mode_map[$logger]=0
+    fi
+  else
+    printf '%(%Y-%m-%d:%H:%M:%S)T %-7s %s\n' -1 WARN \
+    "${BASH_SOURCE[2]}:${BASH_LINENO[1]} Option '-l' needs an argument" >&2
+  fi
+}
+
+#
+# set_log_path
+#
+set_log_path() {
+  local logger=servmgnt in_path l
+  [[ $1 = "-l" ]] && { logger=$2; shift 2 2>/dev/null; }
+  in_path="${1:-/var/log/$logger.log}"
+  if [[ $logger ]]; then
+    _loggers_path_map[$logger]="$in_path"
+  else
+    printf '%(%Y-%m-%d:%H:%M:%S)T %-7s %s\n' -1 WARN \
+    "${BASH_SOURCE[2]}:${BASH_LINENO[1]} Option '-l' needs an argument" >&2
+  fi
+}
+
+
+#
+# Core and private log printing logic to be called by all logging functions.
+# Note that we don't make use of any external commands like 'date' and hence we don't fork at all.
+# We use the Bash's printf builtin instead.
+#
+_print_log() {
+  local in_level=$1; shift
+  local logger=servmgnt log_level_set log_level log_mode
+  [[ $1 = "-l" ]] && { logger=$2; shift 2; }
+  log_level="${_log_levels[$in_level]}"
+  log_level_set="${_loggers_level_map[$logger]}"
+  log_mode="${_loggers_mode_map[$logger]}"
+  if [[ $log_level_set ]]; then
+    ((log_level_set >= log_level)) && {
+      if [ $log_mode -eq 0 ]; then
+        printf '%(%Y-%m-%d:%H:%M:%S)T %-7s %s ' -1 "$in_level" "${BASH_SOURCE[2]}:${BASH_LINENO[1]}"
+        printf '%s\n' "$@"
+      elif [ $log_mode -eq 1 ]; then
+        logger -t "$logger" "$(printf '%-7s %s ' "$in_level" "${BASH_SOURCE[2]}:${BASH_LINENO[1]}"; printf '%s\n' "$@")"
+      elif [ $log_mode -eq 2 ]; then
+        log_path="${_loggers_path_map[$logger]}"
+        if ! [[ $log_path ]]; then
+          printf '%(%Y-%m-%d:%H:%M:%S)T %s\n' -1 "WARN ${BASH_SOURCE[2]}:${BASH_LINENO[1]} Log path not set. Setting default log path for logger '$logger'."
+          set_log_path -l "$logger"
+        fi
+        echo "$(printf '%(%Y-%m-%d:%H:%M:%S)T %-7s %s ' -1 "$in_level" "${BASH_SOURCE[2]}:${BASH_LINENO[1]}"; printf '%s\n' "$@")" >> "$log_path"
+      fi
+    }
+  else
+    if [ $log_mode -eq 0 ]; then
+      printf '%(%Y-%m-%d:%H:%M:%S)T %-7s %s\n' -1 WARN "${BASH_SOURCE[2]}:${BASH_LINENO[1]} Unknown logger '$logger'"
+    elif [ $log_mode -eq 1 ]; then
+      logger -t "$logger" "$(printf '%(%Y-%m-%d:%H:%M:%S)T %-7s %s\n' -1 WARN "${BASH_SOURCE[2]}:${BASH_LINENO[1]} Unknown logger '$logger'")"
+    elif [ $log_mode -eq 2 ]; then
+      printf '%(%Y-%m-%d:%H:%M:%S)T %-7s %s\n' -1 WARN "${BASH_SOURCE[2]}:${BASH_LINENO[1]} Unknown logger '$logger'"
+    fi
+  fi
+}
+
+#
+# main logging functions
+#
+log_fatal()   { _print_log FATAL   "$@"; }
+log_error()   { _print_log ERROR   "$@"; }
+log_warn()    { _print_log WARN    "$@"; }
+log_info()    { _print_log INFO    "$@"; }
+log_debug()   { _print_log DEBUG   "$@"; }
+log_verbose() { _print_log VERBOSE "$@"; }
+# logging file content
+#
+log_info_file()    { _print_log_file INFO    "$@"; }
+log_debug_file()   { _print_log_file DEBUG   "$@"; }
+log_verbose_file() { _print_log_file VERBOSE "$@"; }
+#
+# logging for function entry and exit
+#
+log_info_enter()    { _print_log INFO    "Entering function ${FUNCNAME[1]}"; }
+log_debug_enter()   { _print_log DEBUG   "Entering function ${FUNCNAME[1]}"; }
+log_verbose_enter() { _print_log VERBOSE "Entering function ${FUNCNAME[1]}"; }
+log_info_leave()    { _print_log INFO    "Leaving function ${FUNCNAME[1]}";  }
+log_debug_leave()   { _print_log DEBUG   "Leaving function ${FUNCNAME[1]}";  }
+log_verbose_leave() { _print_log VERBOSE "Leaving function ${FUNCNAME[1]}";  }
+
+# print an error message to stderr
+print_error() {
+  {
+    printf "%sERROR: " "${COLOR_RED}"
+    printf '%s\n' "$@"
+    printf "%s" "$COLOR_OFF"
+  } >&2
+}
+
+# print a warning message to stdout
+print_warn() {
+  printf "%sWARN: " "${COLOR_YELLOW}"
+  printf '%s\n' "$@"
+  printf "%s" "$COLOR_OFF"
+}
+
+print_info() {
+  printf "%s" "${COLOR_BLUE}"
+  printf '%s\n' "$@"
+  printf "%s" "$COLOR_OFF"
+}
+
+################################################## ERROR HANDLING ######################################################
+
+dump_trace() {
+  local frame=0 line func source n=0
+  local logger=servmgnt log_mode
+  [[ $1 = "-l" ]] && { logger=$2; shift 2; }
+  log_mode="${_loggers_mode_map[$logger]}"
+  while caller "$frame"; do
+    ((frame++))
+  done | while read -r line func source; do
+    ((n++ == 0)) && {
+      message="$(printf 'Encountered a fatal error\n')"
+      [[ "$log_mode" != 'stdout' ]] && { log_fatal -l "$logger" "$message"; }
+      echo "$message"
+    }
+    message="$(printf '%4s at %s\n' " " "$func ($source:$line)")"
+    log_fatal "$message"
+    echo "$message"
+  done
+}
+
+exit_if_error() {
+  (($#)) || return
+  local logger=servmgnt log_mode
+  [[ $1 = "-l" ]] && { logger=$2; shift 2; }
+  log_mode="${_loggers_mode_map[$logger]}"
+  local num_re='^[0-9]+'
+  local rc=$1; shift
+  local message="${*:-No message specified}"
+  if ! [[ $rc =~ $num_re ]]; then
+    log_error -l "$logger" "'$rc' is not a valid exit code; it needs to be a number greater than zero. Treating it as 1."
+    rc=1
+  fi
+  ((rc)) && {
+    OLDIFS=$IFS
+    IFS=$'\n'
+    for line in $message; do
+      log_fatal -l "$logger" "$line"
+    done
+    IFS=$OLDIFS
+    dump_trace -l "$logger" "$@"
+    exit $rc
+  }
+  return 0
+}
+
+fatal_error() {
+  local ec=$?                # grab the current exit code
+  local logger=servmgnt
+  ((ec == 0)) && ec=1        # if it is zero, set exit code to 1
+  [[ $1 = "-l" ]] && { logger=$2; shift 2; }
+  exit_if_error -l "$logger" "$ec" "$@"
+}
+
+#
+# run a simple command (no compound statements or pipelines) and exit if it exits with non-zero
+#
+run_simple_or_die() {
+  local mode=quiet
+  local logger=servmgnt log_mode
+
+  [[ "$1" == "-v" ]] && { mode=verbose; shift; }
+  [[ $1 = "-l" ]] && { logger=$2; shift 2; }
+  log_mode="${_loggers_mode_map[$logger]}"
+  [[ "$1" == "-v" ]] && { mode=verbose; shift; }
+
+  __clear_output__
+
+  [[ "$mode" != 'verbose' || $log_mode -ne 0 ]] && {
+    log_debug -l "$logger" "Running command: $*"
+  }
+
+  OUTPUT=$("$@" 2>&1)
+  CODE="$?"
+
+  [[ "$mode" != 'verbose' || $log_mode -ne 0 ]] && {
+    log_debug -l "$logger" "Exit code: $CODE"
+    OLDIFS=$IFS; IFS=$'\n'
+    local count=0
+    for line in $OUTPUT; do
+      log_verbose -l "$logger" "Output line $count: $line"; count=$(( "$count" + 1 ))
+    done
+    IFS=$OLDIFS
+  }
+
+  [[ "$mode" == 'verbose' ]] && { echo "$OUTPUT"; }
+
+  exit_if_error $CODE "run failed: $* (exit code: $CODE)"
+}
+
+#
+# run a simple command (no compound statements or pipelines)
+#
+run_simple() {
+  local mode=quiet
+  local logger=servmgnt log_mode
+
+  [[ "$1" == "-v" ]] && { mode=verbose; shift; }
+  [[ $1 = "-l" ]] && { logger=$2; shift 2; }
+  log_mode="${_loggers_mode_map[$logger]}"
+  [[ "$1" == "-v" ]] && { mode=verbose; shift; }
+
+  __clear_output__
+
+  [[ "$mode" != 'verbose' || "$log_mode" != 'stdout' ]] && {
+    log_debug -l "$logger" "Running command: $*"
+  }
+
+  OUTPUT=$("$@" 2>&1)
+  CODE="$?"
+
+  [[ "$mode" != 'verbose' || "$log_mode" != 'stdout' ]] && {
+    log_debug -l "$logger" "Exit code: $CODE";
+    OLDIFS=$IFS; IFS=$'\n'
+    local count=0
+    for line in $OUTPUT; do
+      log_verbose -l "$logger" "Output line $count: $line"; count=$(( "$count" + 1 ));
+    done
+    IFS=$OLDIFS
+  }
+
+  [[ "$mode" == 'verbose' ]] && { echo "$OUTPUT"; }
+
+  return $CODE
+}
+
+#
+# safe cd
+#
+base_cd() {
+  local dir=$1
+  [[ $dir ]]   || fatal_error "No arguments or an empty string passed to base_cd"
+  cd -- "$dir" || fatal_error "Can't cd to '$dir'"
+}
+
+################################################# MISC FUNCTIONS #######################################################
+#
+# For functions that need to return a single value, we use the global variable OUTPUT.
+# For functions that need to return multiple values, we use the global variable OUTPUT_ARRAY.
+# These global variables eliminate the need for a subshell when the caller wants to retrieve the
+# returned values.
+#
+# Each function that makes use of these global variables would call __clear_output__ as the very first step.
+#
+__clear_output__() { unset OUTPUT OUTPUT_ARRAY CODE; }
+
+#
+# return path to parent script's source directory
+#
+get_my_source_dir() {
+  __clear_output__
+
+  # Reference: https://stackoverflow.com/a/246128/6862601
+  OUTPUT="$(cd "$(dirname "${BASH_SOURCE[1]}")" >/dev/null 2>&1 && pwd -P)"
+}
+
+is_empty() { if [[ "$1" == "" ]]; then return 0; else return 1; fi }
+
+#################################################### END OF FUNCTIONS ##################################################
+
+__stdlib_init__
